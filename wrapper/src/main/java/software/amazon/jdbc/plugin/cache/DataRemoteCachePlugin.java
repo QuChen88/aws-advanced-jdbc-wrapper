@@ -106,7 +106,7 @@ public class DataRemoteCachePlugin extends AbstractConnectionPlugin {
     return subscribedMethods;
   }
 
-  private String getCacheQueryKey(String query) {
+  private String getCacheQueryKey(String query) throws SQLException {
     // Check some basic session states. The important ones for caching include (but not limited to):
     //  schema name, username which can affect the query result from the DB in addition to the query string
     try {
@@ -140,12 +140,15 @@ public class DataRemoteCachePlugin extends AbstractConnectionPlugin {
       String[] words = {catalog, schema, dbUserName, query};
       return String.join("_", words);
     } catch (SQLException e) {
+      if (cacheConnection.shouldFailOnError()) {
+        throw new SQLException("Cache get query key failed", e);
+      }
       LOGGER.warning("Error getting session state: " + e.getMessage());
       return null;
     }
   }
 
-  private ResultSet fetchResultSetFromCache(String queryStr) {
+  private ResultSet fetchResultSetFromCache(String queryStr) throws SQLException {
     if (cacheConnection == null) return null;
 
     String cacheQueryKey = getCacheQueryKey(queryStr);
@@ -156,6 +159,9 @@ public class DataRemoteCachePlugin extends AbstractConnectionPlugin {
     try {
       return CachedResultSet.deserializeFromByteArray(cachedResult);
     } catch (Exception e) {
+      if (cacheConnection.shouldFailOnError()) { // Need to expose this setting
+        throw new SQLException("Cache deserialization failed", e);
+      }
       LOGGER.warning("Error de-serializing cached result: " + e.getMessage());
       return null; // Treat this as a cache miss
     }
@@ -168,11 +174,36 @@ public class DataRemoteCachePlugin extends AbstractConnectionPlugin {
    */
   private ResultSet cacheResultSet(String queryStr, ResultSet rs, int expiry) throws SQLException {
     // Write the resultSet into the cache as a single key
-    String cacheQueryKey = getCacheQueryKey(queryStr);
+    String cacheQueryKey;
+    try {
+      cacheQueryKey = getCacheQueryKey(queryStr);
+    } catch (SQLException e) {
+      // getCacheQueryKey already handles failOnError logic
+      throw e;
+    }
+
     if (cacheQueryKey == null) return rs; // Treat this condition as un-cacheable
-    CachedResultSet crs = new CachedResultSet(rs);
-    byte[] jsonString = crs.serializeIntoByteArray();
-    cacheConnection.writeToCache(cacheQueryKey, jsonString, expiry);
+
+    CachedResultSet crs;
+    byte[] jsonString;
+    try {
+      crs = new CachedResultSet(rs);
+      jsonString = crs.serializeIntoByteArray();
+    } catch (Exception e) {
+      if (cacheConnection.shouldFailOnError()) {
+        throw new SQLException("Cache serialization failed", e);
+      }
+      LOGGER.warning("Error serializing result for cache: " + e.getMessage());
+      return rs;
+    }
+
+    try {
+      cacheConnection.writeToCache(cacheQueryKey, jsonString, expiry);
+    } catch (SQLException e) {
+      // writeToCache already handles failOnError logic
+      throw e;
+    }
+
     crs.beforeFirst();
     return crs;
   }
@@ -285,7 +316,7 @@ public class DataRemoteCachePlugin extends AbstractConnectionPlugin {
       cacheContext = telemetryFactory.openTelemetryContext(
           TELEMETRY_CACHE_LOOKUP, TelemetryTraceLevel.TOP_LEVEL);
       Exception cacheException = null;
-      try{
+      try {
         result = fetchResultSetFromCache(mainQuery);
         if (result == null) {
           // Cache miss. Need to fetch result from the database
@@ -304,6 +335,14 @@ public class DataRemoteCachePlugin extends AbstractConnectionPlugin {
           }
           return resultClass.cast(result);
         }
+      } catch (SQLException cacheEx) {
+        // Cache failure in ERROR mode -- propagate the exception
+        if (cacheContext != null) {
+          cacheContext.setSuccess(false);
+          cacheContext.setException(cacheEx);
+          cacheContext.closeContext();
+        }
+        throw WrapperUtils.wrapExceptionIfNeeded(exceptionClass, cacheEx);
       } finally {
         if (cacheContext != null) {
           if (cacheException != null) {

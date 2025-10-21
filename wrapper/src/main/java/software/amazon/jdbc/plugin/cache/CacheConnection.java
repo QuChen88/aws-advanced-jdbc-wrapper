@@ -32,6 +32,7 @@ import software.amazon.awssdk.regions.Region;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
@@ -106,7 +107,13 @@ public class CacheConnection {
       new AwsWrapperProperty(
           "cacheName",
           null,
-          "Explicit cache name for ElastiCache IAM authentication. ");
+          "Explicit cache name for ElastiCache IAM authentication.");
+
+  protected static final AwsWrapperProperty CACHE_FAIL_ON_ERROR =
+      new AwsWrapperProperty(
+          "cacheFailOnError",
+          "false",
+          "Whether to throw SQLException on cache failures.");
 
   protected static final AwsWrapperProperty CACHE_CONNECTION_TIMEOUT =
       new AwsWrapperProperty(
@@ -125,12 +132,13 @@ public class CacheConnection {
   private static volatile GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> writeConnectionPool;
   private static final GenericObjectPoolConfig<StatefulRedisConnection<byte[], byte[]>> poolConfig = createPoolConfig();
 
-  private final boolean useSSL;
+  private final boolean cacheUseSSL;
   private final boolean iamAuthEnabled;
   private final String cacheIamRegion;
   private final String cacheUsername;
   private final String cacheName;
   private final String cachePassword;
+  private final Boolean cacheFailOnError;
   private final Duration cacheConnectionTimeout;
   private final int cacheConnectionPoolSize;
   private final Properties awsProfileProperties;
@@ -143,7 +151,7 @@ public class CacheConnection {
   public CacheConnection(final Properties properties) {
     this.cacheRwServerAddr = CACHE_RW_ENDPOINT_ADDR.getString(properties);
     this.cacheRoServerAddr = CACHE_RO_ENDPOINT_ADDR.getString(properties);
-    this.useSSL = Boolean.parseBoolean(CACHE_USE_SSL.getString(properties));
+    this.cacheUseSSL = Boolean.parseBoolean(CACHE_USE_SSL.getString(properties));
     this.cacheName = CACHE_NAME.getString(properties);
     this.cacheIamRegion = CACHE_IAM_REGION.getString(properties);
     this.cacheUsername = CACHE_USERNAME.getString(properties);
@@ -191,6 +199,7 @@ public class CacheConnection {
     } else {
       this.credentialsProvider = null;
     }
+    this.cacheFailOnError = Boolean.parseBoolean(CACHE_FAIL_ON_ERROR.getString(properties));
   }
 
   /* Here we check if we need to initialise connection pool for read or write to cache.
@@ -288,7 +297,7 @@ public class CacheConnection {
     return msgHashDigest.digest();
   }
 
-  public byte[] readFromCache(String key) {
+  public byte[] readFromCache(String key) throws SQLException {
     boolean isBroken = false;
     StatefulRedisConnection<byte[], byte[]> conn = null;
     // get a connection from the read connection pool
@@ -299,6 +308,9 @@ public class CacheConnection {
     } catch (Exception e) {
       if (conn != null) {
         isBroken = true;
+      }
+      if (cacheFailOnError) {
+        throw new SQLException("Cache read operation failed", e);
       }
       LOGGER.warning("Failed to read result from cache. Treating it as a cache miss: " + e.getMessage());
       return null;
@@ -335,26 +347,38 @@ public class CacheConnection {
     }
   }
 
-  public void writeToCache(String key, byte[] value, int expiry) {
+  public void writeToCache(String key, byte[] value, int expiry) throws SQLException {
     StatefulRedisConnection<byte[], byte[]> conn = null;
+    boolean shouldReturnConnection = true;
     try {
       initializeCacheConnectionIfNeeded(false);
       // get a connection from the write connection pool
       conn = writeConnectionPool.borrowObject();
-      // Write to the cache is async.
-      RedisAsyncCommands<byte[], byte[]> asyncCommands = conn.async();
       byte[] keyHash = computeHashDigest(key.getBytes(StandardCharsets.UTF_8));
-      StatefulRedisConnection<byte[], byte[]> finalConn = conn;
-      asyncCommands.set(keyHash, value, SetArgs.Builder.ex(expiry))
-          .whenComplete((result, exception) -> handleCompletedCacheWrite(finalConn, exception));
+
+      if (cacheFailOnError) {
+        conn.sync().set(keyHash, value, SetArgs.Builder.ex(expiry));
+      } else {
+        // Write to the cache is async.
+        RedisAsyncCommands<byte[], byte[]> asyncCommands = conn.async();
+        StatefulRedisConnection<byte[], byte[]> finalConn = conn;
+        asyncCommands.set(keyHash, value, SetArgs.Builder.ex(expiry))
+            .whenComplete((result, exception) -> handleCompletedCacheWrite(finalConn, exception));
+        shouldReturnConnection = false; // Async callback will handle return
+      }
     } catch (Exception e) {
+      if (cacheFailOnError) {
+        throw new SQLException("Cache write operation failed", e);
+      }
       // Failed to trigger the async write to the cache, return the cache connection to the pool as broken
       LOGGER.warning("Unable to start writing to cache: " + e.getMessage());
-      if (conn != null && writeConnectionPool != null) {
+    } finally {
+      if (conn != null && writeConnectionPool != null && shouldReturnConnection) {
+        // Only return connection immediately for synchronous operations or async operation failed to start
         try {
           returnConnectionBackToPool(conn, true, false);
         } catch (Exception ex) {
-          LOGGER.warning("Error closing write connection: " + ex.getMessage());
+          LOGGER.warning("Error returning write connection: " + ex.getMessage());
         }
       }
     }
@@ -388,7 +412,7 @@ public class CacheConnection {
   protected RedisURI buildRedisURI(String hostname, int port) {
     RedisURI.Builder uriBuilder = RedisURI.Builder.redis(hostname)
         .withPort(port)
-        .withSsl(useSSL)
+        .withSsl(cacheUseSSL)
         .withVerifyPeer(false)
         .withLibraryName("aws-sql-jdbc-lettuce")
         .withTimeout(cacheConnectionTimeout);
@@ -423,5 +447,9 @@ public class CacheConnection {
 
   private String[] getHostnameAndPort(String serverAddr) {
     return serverAddr.split(":");
+  }
+
+  public boolean shouldFailOnError() {
+    return cacheFailOnError;
   }
 }
