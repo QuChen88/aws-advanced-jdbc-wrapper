@@ -16,15 +16,12 @@
 
 package software.amazon.jdbc.plugin.cache;
 
-import io.lettuce.core.RedisFuture;
-import io.lettuce.core.RedisURI;
-import io.lettuce.core.api.StatefulConnection;
-import io.lettuce.core.api.StatefulRedisConnection;
-import io.lettuce.core.api.async.RedisAsyncCommands;
-import io.lettuce.core.api.sync.RedisCommands;
-import io.lettuce.core.cluster.api.StatefulRedisClusterConnection;
-import io.lettuce.core.cluster.api.async.RedisAdvancedClusterAsyncCommands;
-import io.lettuce.core.cluster.api.sync.RedisAdvancedClusterCommands;
+import glide.api.BaseClient;
+import glide.api.GlideClient;
+import glide.api.GlideClusterClient;
+import glide.api.models.GlideString;
+import glide.api.models.commands.SetOptions;
+import glide.api.models.configuration.BaseClientConfiguration;
 import org.apache.commons.pool2.impl.GenericObjectPool;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -42,6 +39,8 @@ import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.Properties;
 
@@ -49,15 +48,11 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 public class CacheConnectionTest {
-  @Mock GenericObjectPool<StatefulConnection<byte[], byte[]>> mockReadConnPool;
-  @Mock GenericObjectPool<StatefulConnection<byte[], byte[]>> mockWriteConnPool;
-  @Mock StatefulRedisConnection<byte[], byte[]> mockConnection;
-  @Mock RedisCommands<byte[], byte[]> mockSyncCommands;
-  @Mock RedisAsyncCommands<byte[], byte[]> mockAsyncCommands;
-  @Mock StatefulRedisClusterConnection<byte[], byte[]> mockClusterConnection;
-  @Mock RedisAdvancedClusterCommands<byte[], byte[]> mockClusterSyncCommands;
-  @Mock RedisAdvancedClusterAsyncCommands<byte[], byte[]> mockClusterAsyncCommands;
-  @Mock RedisFuture<String> mockCacheResult;
+  @Mock GenericObjectPool<BaseClient> mockReadConnPool;
+  @Mock GenericObjectPool<BaseClient> mockWriteConnPool;
+  @Mock GlideClient mockClient;
+  @Mock GlideClusterClient mockClusterClient;
+  @Mock CompletableFuture<String> mockCacheResult;
   private AutoCloseable closeable;
   private CacheConnection cacheConnection;
 
@@ -240,34 +235,37 @@ public class CacheConnectionTest {
   }
 
   @Test
-  void testBuildRedisURI_IamAuth() {
+  void testBuildGlideConfig_IamAuth() {
     Properties props = new Properties();
     props.setProperty("cacheEndpointAddrRw", "localhost:6379");
     props.setProperty("cacheIamRegion", "us-east-1");
     props.setProperty("cacheUsername", "testuser");
     props.setProperty("cacheName", "test-cache");
 
-    try (MockedConstruction<ElastiCacheIamTokenUtility> mockedTokenUtility = mockConstruction(ElastiCacheIamTokenUtility.class)) {
+    try (MockedConstruction<ElastiCacheIamTokenUtility> mockedTokenUtility = mockConstruction(ElastiCacheIamTokenUtility.class,
+        (mock, context) -> {
+          when(mock.generateAuthenticationToken(
+              any(AwsCredentialsProvider.class),
+              any(Region.class),
+              anyString(),
+              anyInt(),
+              anyString()
+          )).thenReturn("mock-iam-token");
+        })) {
 
       CacheConnection connection = new CacheConnection(props);
-      RedisURI uri = connection.buildRedisURI("localhost", 6379);
+      BaseClientConfiguration config = connection.buildClientConfiguration("localhost", 6379, false);
 
-      // Verify URI properties
-      assertNotNull(uri);
-      assertEquals("localhost", uri.getHost());
-      assertEquals(6379, uri.getPort());
-      assertTrue(uri.isSsl());
-      assertNotNull(uri.getCredentialsProvider());
+      // Verify Configuration properties
+      assertNotNull(config);
+      assertEquals("localhost", config.getAddresses().get(0).getHost());
+      assertEquals(6379, config.getAddresses().get(0).getPort());
+      assertTrue(config.isUseTLS());
+      assertNotNull(config.getCredentials());
 
-      // Trigger the credentials provider to create the token utility
-      uri.getCredentialsProvider().resolveCredentials().block();
-
-      // Verify URI properties
-      assertNotNull(uri);
-      assertEquals("localhost", uri.getHost());
-      assertEquals(6379, uri.getPort());
-      assertTrue(uri.isSsl());
-      assertNotNull(uri.getCredentialsProvider()); // IAM credentials provider set
+      // Verify token was actually retrieved (equivalent to .block())
+      assertEquals("testuser", config.getCredentials().getUsername());
+      assertEquals("mock-iam-token", config.getCredentials().getPassword());
 
       // Verify ElastiCacheIamTokenUtility was constructed with correct parameters
       // Verify token utility construction
@@ -284,35 +282,34 @@ public class CacheConnectionTest {
   }
 
   @Test
-  void testBuildRedisURI_TraditionalAuth() {
+  void testBuildGlideConfig_TraditionalAuth() {
     Properties props = new Properties();
     props.setProperty("cacheEndpointAddrRw", "localhost:6379");
     props.setProperty("cacheUsername", "user");
     props.setProperty("cachePassword", "pass");
 
     CacheConnection connection = new CacheConnection(props);
-    RedisURI uri = connection.buildRedisURI("localhost", 6379);
+    BaseClientConfiguration config = connection.buildClientConfiguration("localhost", 6379, false);
 
-    assertNotNull(uri);
-    assertEquals("localhost", uri.getHost());
-    assertEquals(6379, uri.getPort());
-    assertEquals("user", uri.getUsername());
-    assertEquals("pass", new String(uri.getPassword()));
+    assertNotNull(config);
+    assertEquals("localhost", config.getAddresses().get(0).getHost());
+    assertEquals(6379, config.getAddresses().get(0).getPort());
+    assertEquals("user", config.getCredentials().getUsername());
+    assertEquals("pass", config.getCredentials().getPassword());
   }
 
   @Test
-  void testBuildRedisURI_NoAuth() {
+  void testBuildGlideConfig_NoAuth() {
     Properties props = new Properties();
     props.setProperty("cacheEndpointAddrRw", "localhost:6379");
 
     CacheConnection connection = new CacheConnection(props);
-    RedisURI uri = connection.buildRedisURI("localhost", 6379);
+    BaseClientConfiguration config = connection.buildClientConfiguration("localhost", 6379, false);
 
-    assertNotNull(uri);
-    assertEquals("localhost", uri.getHost());
-    assertEquals(6379, uri.getPort());
-    assertNull(uri.getUsername());
-    assertNull(uri.getPassword());
+    assertNotNull(config);
+    assertEquals("localhost", config.getAddresses().get(0).getHost());
+    assertEquals(6379, config.getAddresses().get(0).getPort());
+    assertNull(config.getCredentials());
   }
 
   @Test
@@ -325,14 +322,12 @@ public class CacheConnectionTest {
 
     String key = "myQueryKey";
     byte[] value = "myValue".getBytes(StandardCharsets.UTF_8);
-    when(mockWriteConnPool.borrowObject()).thenReturn(mockConnection);
-    when(mockConnection.async()).thenReturn(mockAsyncCommands);
-    when(mockAsyncCommands.set(any(), any(), any())).thenReturn(mockCacheResult);
+    when(mockWriteConnPool.borrowObject()).thenReturn(mockClient);
+    when(mockClient.set(any(GlideString.class), any(GlideString.class), any(SetOptions.class))).thenReturn(mockCacheResult);
     when(mockCacheResult.whenComplete(any(BiConsumer.class))).thenReturn(null);
     spyConnection.writeToCache(key, value, 100);
     verify(mockWriteConnPool).borrowObject();
-    verify(mockConnection).async();
-    verify(mockAsyncCommands).set(any(), any(), any());
+    verify(mockClient).set(any(GlideString.class), any(GlideString.class), any(SetOptions.class));
     verify(mockCacheResult).whenComplete(any(BiConsumer.class));
   }
 
@@ -346,14 +341,13 @@ public class CacheConnectionTest {
 
     String key = "myQueryKey";
     byte[] value = "myValue".getBytes(StandardCharsets.UTF_8);
-    when(mockWriteConnPool.borrowObject()).thenReturn(mockConnection);
-    when(mockConnection.async()).thenReturn(mockAsyncCommands);
-    when(mockAsyncCommands.set(any(), any(), any())).thenThrow(new RuntimeException("test exception"));
+    when(mockWriteConnPool.borrowObject()).thenReturn(mockClient);
+    when(mockClient.set(any(GlideString.class), any(GlideString.class), any(SetOptions.class)))
+        .thenThrow(new RuntimeException("test exception"));
     spyConnection.writeToCache(key, value, 100);
     verify(mockWriteConnPool).borrowObject();
-    verify(mockConnection).async();
-    verify(mockAsyncCommands).set(any(), any(), any());
-    verify(mockWriteConnPool).invalidateObject(mockConnection);
+    verify(mockClient).set(any(GlideString.class), any(GlideString.class), any(SetOptions.class));
+    verify(mockWriteConnPool).invalidateObject(mockClient);
   }
 
   @Test
@@ -363,25 +357,25 @@ public class CacheConnectionTest {
     doNothing().when(spyConnection).reportErrorToCacheMonitor(anyBoolean(), any(), any());
 
     // Success: decrement called, no error reported, connection returned
-    spyConnection.handleCompletedCacheWrite(mockConnection, 150L, null);
+    spyConnection.handleCompletedCacheWrite(mockClient, 150L, null);
     verify(spyConnection).decrementInFlightSize(150L);
     verify(spyConnection, never()).reportErrorToCacheMonitor(anyBoolean(), any(), any());
-    verify(mockWriteConnPool).returnObject(mockConnection);
+    verify(mockWriteConnPool).returnObject(mockClient);
 
     // Failure: decrement called, error reported, connection invalidated
     RuntimeException writeError = new RuntimeException("Redis timeout");
-    spyConnection.handleCompletedCacheWrite(mockConnection, 200L, writeError);
+    spyConnection.handleCompletedCacheWrite(mockClient, 200L, writeError);
     verify(spyConnection).decrementInFlightSize(200L);
     verify(spyConnection).reportErrorToCacheMonitor(eq(true), eq(writeError), eq("WRITE"));
-    verify(mockWriteConnPool).invalidateObject(mockConnection);
+    verify(mockWriteConnPool).invalidateObject(mockClient);
 
     // Multiple operations: mixed success/failure
-    spyConnection.handleCompletedCacheWrite(mockConnection, 100L, null);
-    spyConnection.handleCompletedCacheWrite(mockConnection, 250L, new RuntimeException("lost"));
+    spyConnection.handleCompletedCacheWrite(mockClient, 100L, null);
+    spyConnection.handleCompletedCacheWrite(mockClient, 250L, new RuntimeException("lost"));
     verify(spyConnection).decrementInFlightSize(100L);
     verify(spyConnection).decrementInFlightSize(250L);
-    verify(mockWriteConnPool, times(2)).returnObject(mockConnection);
-    verify(mockWriteConnPool, times(2)).invalidateObject(mockConnection);
+    verify(mockWriteConnPool, times(2)).returnObject(mockClient);
+    verify(mockWriteConnPool, times(2)).invalidateObject(mockClient);
   }
 
   @Test
@@ -391,15 +385,14 @@ public class CacheConnectionTest {
     doNothing().when(spyConnection).reportErrorToCacheMonitor(anyBoolean(), any(), any());
 
     byte[] value = "myValue".getBytes(StandardCharsets.UTF_8);
-    when(mockReadConnPool.borrowObject()).thenReturn(mockConnection);
-    when(mockConnection.sync()).thenReturn(mockSyncCommands);
-    when(mockSyncCommands.get(any())).thenReturn(value);
+    GlideString glideValue = GlideString.of(value);
+    when(mockReadConnPool.borrowObject()).thenReturn(mockClient);
+    when(mockClient.get(any(GlideString.class))).thenReturn(CompletableFuture.completedFuture(glideValue));
     byte[] result = spyConnection.readFromCache("myQueryKey");
-    assertEquals(value, result);
+    assertArrayEquals(value, result);
     verify(mockReadConnPool).borrowObject();
-    verify(mockConnection).sync();
-    verify(mockSyncCommands).get(any());
-    verify(mockReadConnPool).returnObject(mockConnection);
+    verify(mockClient).get(any(GlideString.class));
+    verify(mockReadConnPool).returnObject(mockClient);
   }
 
   @Test
@@ -408,14 +401,14 @@ public class CacheConnectionTest {
     when(spyConnection.getClusterHealthStateFromCacheMonitor()).thenReturn(CacheMonitor.HealthState.HEALTHY);
     doNothing().when(spyConnection).reportErrorToCacheMonitor(anyBoolean(), any(), any());
 
-    when(mockReadConnPool.borrowObject()).thenReturn(mockConnection);
-    when(mockConnection.sync()).thenReturn(mockSyncCommands);
-    when(mockSyncCommands.get(any())).thenThrow(new RuntimeException("test"));
+    when(mockReadConnPool.borrowObject()).thenReturn(mockClient);
+    when(mockClient.get(any(GlideString.class)))
+        .thenReturn(CompletableFuture.failedFuture(new RuntimeException("test")));
+
     assertNull(spyConnection.readFromCache("myQueryKey"));
     verify(mockReadConnPool).borrowObject();
-    verify(mockConnection).sync();
-    verify(mockSyncCommands).get(any());
-    verify(mockReadConnPool).invalidateObject(mockConnection);
+    verify(mockClient).get(any(GlideString.class));
+    verify(mockReadConnPool).invalidateObject(mockClient);
   }
 
   @ParameterizedTest
@@ -436,15 +429,15 @@ public class CacheConnectionTest {
     // Test WRITE operation
     if (isClusterMode) {
       // Mock cluster connection for write
-      when(mockWriteConnPool.borrowObject()).thenReturn(mockClusterConnection);
-      when(mockClusterConnection.async()).thenReturn(mockClusterAsyncCommands);
-      when(mockClusterAsyncCommands.set(any(), any(), any())).thenReturn(mockCacheResult);
+      when(mockWriteConnPool.borrowObject()).thenReturn(mockClusterClient);
+      when(mockClusterClient.set(any(GlideString.class), any(GlideString.class), any(SetOptions.class)))
+          .thenReturn(mockCacheResult);
       when(mockCacheResult.whenComplete(any(BiConsumer.class))).thenReturn(null);
     } else {
       // Mock standalone connection for write
-      when(mockWriteConnPool.borrowObject()).thenReturn(mockConnection);
-      when(mockConnection.async()).thenReturn(mockAsyncCommands);
-      when(mockAsyncCommands.set(any(), any(), any())).thenReturn(mockCacheResult);
+      when(mockWriteConnPool.borrowObject()).thenReturn(mockClient);
+      when(mockClient.set(any(GlideString.class), any(GlideString.class), any(SetOptions.class)))
+          .thenReturn(mockCacheResult);
       when(mockCacheResult.whenComplete(any(BiConsumer.class))).thenReturn(null);
     }
 
@@ -455,31 +448,27 @@ public class CacheConnectionTest {
     // Test READ operation
     if (isClusterMode) {
       // Mock cluster connection for read
-      when(mockReadConnPool.borrowObject()).thenReturn(mockClusterConnection);
-      when(mockClusterConnection.sync()).thenReturn(mockClusterSyncCommands);
-      when(mockClusterSyncCommands.get(any())).thenReturn(value);
+      GlideString glideValue = GlideString.of(value);
+      when(mockReadConnPool.borrowObject()).thenReturn(mockClusterClient);
+      when(mockClusterClient.get(any(GlideString.class))).thenReturn(CompletableFuture.completedFuture(glideValue));
     } else {
       // Mock standalone connection for read
-      when(mockReadConnPool.borrowObject()).thenReturn(mockConnection);
-      when(mockConnection.sync()).thenReturn(mockSyncCommands);
-      when(mockSyncCommands.get(any())).thenReturn(value);
+      GlideString glideValue = GlideString.of(value);
+      when(mockReadConnPool.borrowObject()).thenReturn(mockClient);
+      when(mockClient.get(any(GlideString.class))).thenReturn(CompletableFuture.completedFuture(glideValue));
     }
 
     byte[] result = spyConnection.readFromCache(key);
-    assertEquals(value, result);
+    assertArrayEquals(value, result);
     verify(mockReadConnPool).borrowObject();
 
     // Verify appropriate connection type was used
     if (isClusterMode) {
-      verify(mockClusterConnection).async();
-      verify(mockClusterConnection).sync();
-      verify(mockClusterAsyncCommands).set(any(), any(), any());
-      verify(mockClusterSyncCommands).get(any());
+      verify(mockClusterClient).set(any(GlideString.class), any(GlideString.class), any(SetOptions.class));
+      verify(mockClusterClient).get(any(GlideString.class));
     } else {
-      verify(mockConnection).async();
-      verify(mockConnection).sync();
-      verify(mockAsyncCommands).set(any(), any(), any());
-      verify(mockSyncCommands).get(any());
+      verify(mockClient).set(any(GlideString.class), any(GlideString.class), any(SetOptions.class));
+      verify(mockClient).get(any(GlideString.class));
     }
   }
 
@@ -499,33 +488,29 @@ public class CacheConnectionTest {
 
     // Test WRITE exception handling
     if (isClusterMode) {
-      when(mockWriteConnPool.borrowObject()).thenReturn(mockClusterConnection);
-      when(mockClusterConnection.async()).thenReturn(mockClusterAsyncCommands);
-      when(mockClusterAsyncCommands.set(any(), any(), any())).thenThrow(new RuntimeException("cluster write error"));
+      when(mockWriteConnPool.borrowObject()).thenReturn(mockClusterClient);
+      when(mockClusterClient.set(any(GlideString.class), any(GlideString.class), any(SetOptions.class))).thenThrow(new RuntimeException("cluster write error"));
     } else {
-      when(mockWriteConnPool.borrowObject()).thenReturn(mockConnection);
-      when(mockConnection.async()).thenReturn(mockAsyncCommands);
-      when(mockAsyncCommands.set(any(), any(), any())).thenThrow(new RuntimeException("standalone write error"));
+      when(mockWriteConnPool.borrowObject()).thenReturn(mockClient);
+      when(mockClient.set(any(GlideString.class), any(GlideString.class), any(SetOptions.class))).thenThrow(new RuntimeException("standalone write error"));
     }
 
     spyConnection.writeToCache(key, value, 100);
     verify(mockWriteConnPool).borrowObject();
-    verify(mockWriteConnPool).invalidateObject(isClusterMode ? mockClusterConnection : mockConnection);
+    verify(mockWriteConnPool).invalidateObject(isClusterMode ? mockClusterClient : mockClient);
 
     // Test READ exception handling
     if (isClusterMode) {
-      when(mockReadConnPool.borrowObject()).thenReturn(mockClusterConnection);
-      when(mockClusterConnection.sync()).thenReturn(mockClusterSyncCommands);
-      when(mockClusterSyncCommands.get(any())).thenThrow(new RuntimeException("cluster read error"));
+      when(mockReadConnPool.borrowObject()).thenReturn(mockClusterClient);
+      when(mockClusterClient.get(any(GlideString.class))).thenThrow(new RuntimeException("cluster read error"));
     } else {
-      when(mockReadConnPool.borrowObject()).thenReturn(mockConnection);
-      when(mockConnection.sync()).thenReturn(mockSyncCommands);
-      when(mockSyncCommands.get(any())).thenThrow(new RuntimeException("standalone read error"));
+      when(mockReadConnPool.borrowObject()).thenReturn(mockClient);
+      when(mockClient.get(any(GlideString.class))).thenThrow(new RuntimeException("standalone read error"));
     }
 
     assertNull(spyConnection.readFromCache(key));
     verify(mockReadConnPool).borrowObject();
-    verify(mockReadConnPool).invalidateObject(isClusterMode ? mockClusterConnection : mockConnection);
+    verify(mockReadConnPool).invalidateObject(isClusterMode ? mockClusterClient : mockClient);
   }
 
   @Test
@@ -544,8 +529,8 @@ public class CacheConnectionTest {
     connection.triggerPoolInit(true);
     connection.triggerPoolInit(false);
 
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> readPool  = getInstancePool(connection,"readConnectionPool");
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> writePool = getInstancePool(connection, "writeConnectionPool");
+    GenericObjectPool<BaseClient> readPool  = getInstancePool(connection,"readConnectionPool");
+    GenericObjectPool<BaseClient> writePool = getInstancePool(connection, "writeConnectionPool");
 
     assertNotNull(readPool, "read pool should be created");
     assertNotNull(writePool, "write pool should be created");
@@ -575,8 +560,8 @@ public class CacheConnectionTest {
     connection.triggerPoolInit(true);
     connection.triggerPoolInit(false);
 
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> readPool  = getInstancePool(connection,"readConnectionPool");
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> writePool = getInstancePool(connection, "writeConnectionPool");
+    GenericObjectPool<BaseClient> readPool  = getInstancePool(connection,"readConnectionPool");
+    GenericObjectPool<BaseClient> writePool = getInstancePool(connection, "writeConnectionPool");
 
     assertNotNull(readPool, "read pool should be created");
     assertNotNull(writePool, "write pool should be created");
@@ -609,10 +594,10 @@ public class CacheConnectionTest {
   }
 
   @SuppressWarnings("unchecked")
-  private static GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> getInstancePool(CacheConnection connection, String fieldName) throws Exception {
+  private static GenericObjectPool<BaseClient> getInstancePool(CacheConnection connection, String fieldName) throws Exception {
     Field f = CacheConnection.class.getDeclaredField(fieldName);
     f.setAccessible(true);
-    return (GenericObjectPool<StatefulRedisConnection<byte[], byte[]>>) f.get(connection);
+    return (GenericObjectPool<BaseClient>) f.get(connection);
   }
 
   private static void clearStaticRegistry() throws Exception {
@@ -642,19 +627,17 @@ public class CacheConnectionTest {
 
     // HEALTHY state: operations proceed
     when(spyConnection.getClusterHealthStateFromCacheMonitor()).thenReturn(CacheMonitor.HealthState.HEALTHY);
-    when(mockWriteConnPool.borrowObject()).thenReturn(mockConnection);
-    when(mockConnection.async()).thenReturn(mockAsyncCommands);
-    when(mockAsyncCommands.set(any(), any(), any())).thenReturn(mockCacheResult);
+    when(mockWriteConnPool.borrowObject()).thenReturn(mockClient);
+    when(mockClient.set(any(GlideString.class), any(GlideString.class), any(SetOptions.class))).thenReturn(mockCacheResult);
     when(mockCacheResult.whenComplete(any(BiConsumer.class))).thenReturn(null);
     spyConnection.writeToCache(key, value, 100);
     verify(mockWriteConnPool).borrowObject();
     verify(spyConnection).incrementInFlightSize(anyLong());
 
     // Error reporting on read failure
-    when(mockReadConnPool.borrowObject()).thenReturn(mockConnection);
-    when(mockConnection.sync()).thenReturn(mockSyncCommands);
+    when(mockReadConnPool.borrowObject()).thenReturn(mockClient);
     RuntimeException testException = new RuntimeException("Connection failed");
-    when(mockSyncCommands.get(any())).thenThrow(testException);
+    when(mockClient.get(any(GlideString.class))).thenThrow(testException);
     assertNull(spyConnection.readFromCache(key));
     verify(spyConnection).reportErrorToCacheMonitor(eq(false), eq(testException), eq("READ"));
 
@@ -694,10 +677,10 @@ public class CacheConnectionTest {
     connection2.triggerPoolInit(true);
     connection2.triggerPoolInit(false);
 
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> readPool1 = getInstancePool(connection1, "readConnectionPool");
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> readPool2 = getInstancePool(connection2, "readConnectionPool");
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> writePool1 = getInstancePool(connection1, "writeConnectionPool");
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> writePool2 = getInstancePool(connection2, "writeConnectionPool");
+    GenericObjectPool<BaseClient> readPool1 = getInstancePool(connection1, "readConnectionPool");
+    GenericObjectPool<BaseClient> readPool2 = getInstancePool(connection2, "readConnectionPool");
+    GenericObjectPool<BaseClient> writePool1 = getInstancePool(connection1, "writeConnectionPool");
+    GenericObjectPool<BaseClient> writePool2 = getInstancePool(connection2, "writeConnectionPool");
 
     assertSame(readPool1, readPool2, "Read pools should be the same instance");
     assertSame(writePool1, writePool2, "Write pools should be the same instance");
@@ -715,8 +698,8 @@ public class CacheConnectionTest {
     connection3.triggerPoolInit(true);
     connection3.triggerPoolInit(false);
 
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> readPool3 = getInstancePool(connection3, "readConnectionPool");
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> writePool3 = getInstancePool(connection3, "writeConnectionPool");
+    GenericObjectPool<BaseClient> readPool3 = getInstancePool(connection3, "readConnectionPool");
+    GenericObjectPool<BaseClient> writePool3 = getInstancePool(connection3, "writeConnectionPool");
 
     assertNotSame(readPool1, readPool3, "Read pools should be different instances");
     assertNotSame(writePool1, writePool3, "Write pools should be different instances");
@@ -732,8 +715,8 @@ public class CacheConnectionTest {
     connection4.triggerPoolInit(false);
     connection4.triggerPoolInit(true);
 
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> writePool4 = getInstancePool(connection4, "writeConnectionPool");
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> readPool4 = getInstancePool(connection4, "readConnectionPool");
+    GenericObjectPool<BaseClient> writePool4 = getInstancePool(connection4, "writeConnectionPool");
+    GenericObjectPool<BaseClient> readPool4 = getInstancePool(connection4, "readConnectionPool");
 
     assertSame(writePool1, writePool4, "Write pools should be shared for same RW endpoint");
     assertEquals(10, writePool4.getMaxTotal(), "Connection pool size should not be changed.");
@@ -769,9 +752,9 @@ public class CacheConnectionTest {
     t3.join();
 
     // All should reference the same pool
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> pool1 = getInstancePool(connection1, "writeConnectionPool");
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> pool2 = getInstancePool(connection2, "writeConnectionPool");
-    GenericObjectPool<StatefulRedisConnection<byte[], byte[]>> pool3 = getInstancePool(connection3, "writeConnectionPool");
+    GenericObjectPool<BaseClient> pool1 = getInstancePool(connection1, "writeConnectionPool");
+    GenericObjectPool<BaseClient> pool2 = getInstancePool(connection2, "writeConnectionPool");
+    GenericObjectPool<BaseClient> pool3 = getInstancePool(connection3, "writeConnectionPool");
 
     assertSame(pool1, pool2);
     assertSame(pool2, pool3);
@@ -843,9 +826,8 @@ public class CacheConnectionTest {
     byte[] testValue = "test_value".getBytes(StandardCharsets.UTF_8);
 
     // write operation with size calculation
-    when(mockWriteConnPool.borrowObject()).thenReturn(mockConnection);
-    when(mockConnection.async()).thenReturn(mockAsyncCommands);
-    when(mockAsyncCommands.set(any(byte[].class), any(byte[].class), any()))
+    when(mockWriteConnPool.borrowObject()).thenReturn(mockClient);
+    when(mockClient.set(any(GlideString.class), any(GlideString.class), any(SetOptions.class)))
         .thenReturn(mockCacheResult);
     when(mockCacheResult.whenComplete(any(BiConsumer.class))).thenAnswer(invocation -> {
       BiConsumer<String, Throwable> callback = invocation.getArgument(0);
@@ -857,40 +839,41 @@ public class CacheConnectionTest {
     Thread.sleep(100); // Wait for async completion
 
     // set was called with prefixed key
-    verify(mockAsyncCommands).set(
-        argThat(key -> {
-          if (key.length < 4) return false;
-          String keyStr = new String(key, 0, 4, StandardCharsets.UTF_8);
+    verify(mockClient).set(
+        argThat((GlideString key) -> {
+          byte[] keyBytes = key.getBytes();
+          if (keyBytes.length < 4) return false;
+          String keyStr = new String(keyBytes, 0, 4, StandardCharsets.UTF_8);
           return keyStr.equals(prefix);
         }),
-        eq(testValue),
-        any()
+        argThat((GlideString value) -> Arrays.equals(value.getBytes(), testValue)),
+        any(SetOptions.class)
     );
 
     // write size calculation includes prefix (prefix=4 + hash=48 + value=10 = 62)
     long expectedSize = prefix.length() + 48 + testValue.length;
     verify(spyConnection).incrementInFlightSize(expectedSize);
     verify(spyConnection).decrementInFlightSize(expectedSize);
-    verify(mockWriteConnPool).returnObject(mockConnection);
+    verify(mockWriteConnPool).returnObject(mockClient);
 
     // read operation
     byte[] expectedValue = "cached_data".getBytes(StandardCharsets.UTF_8);
-    when(mockReadConnPool.borrowObject()).thenReturn(mockConnection);
-    when(mockConnection.sync()).thenReturn(mockSyncCommands);
-    when(mockSyncCommands.get(any(byte[].class))).thenReturn(expectedValue);
+    when(mockReadConnPool.borrowObject()).thenReturn(mockClient);
+    when(mockClient.get(any(GlideString.class))).thenReturn(CompletableFuture.completedFuture(GlideString.of(expectedValue)));
 
     byte[] result = spyConnection.readFromCache(testKey);
 
     assertArrayEquals(expectedValue, result);
 
     // get was called with prefixed key
-    verify(mockSyncCommands).get(argThat(key -> {
-      if (key.length < 4) return false;
-      String keyStr = new String(key, 0, 4, StandardCharsets.UTF_8);
+    verify(mockClient).get(argThat((GlideString key) -> {
+      byte[] keyBytes = key.getBytes();
+      if (keyBytes.length < 4) return false;
+      String keyStr = new String(keyBytes, 0, 4, StandardCharsets.UTF_8);
       return keyStr.equals(prefix);
     }));
 
-    verify(mockReadConnPool).returnObject(mockConnection);
+    verify(mockReadConnPool).returnObject(mockClient);
   }
 
   private Properties createBaseProperties() {
