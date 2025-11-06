@@ -97,7 +97,7 @@ public class DataRemoteCachePlugin extends AbstractConnectionPlugin implements S
 
   public DataRemoteCachePlugin(FullServicesContainer servicesContainer, final Properties properties) {
     try {
-      Class.forName("io.lettuce.core.RedisClient"); // Lettuce dependency
+      Class.forName("glide.api.GlideClient"); // Glide client dependency
       Class.forName("org.apache.commons.pool2.impl.GenericObjectPool"); // Object pool dependency
     } catch (final ClassNotFoundException e) {
       throw new RuntimeException(Messages.get("DataRemoteCachePlugin.notInClassPath", new Object[]{e}));
