@@ -53,7 +53,7 @@ dependencies {
     optionalImplementation("io.opentelemetry:opentelemetry-api:1.59.0")
     optionalImplementation("io.opentelemetry:opentelemetry-sdk:1.59.0")
     optionalImplementation("io.opentelemetry:opentelemetry-sdk-metrics:1.59.0")
-    optionalImplementation("io.valkey:valkey-glide:2.+:$nativeClassifier")
+    optionalImplementation("io.valkey:valkey-glide:2.3.0:$nativeClassifier")
 
     compileOnly("org.checkerframework:checker-qual:3.49.5")
     compileOnly("com.mysql:mysql-connector-j:9.4.0")
@@ -113,7 +113,7 @@ dependencies {
     testImplementation("org.hibernate:hibernate-core:5.6.15.Final") // the latest version compatible with Java 8
     testImplementation("jakarta.persistence:jakarta.persistence-api:2.2.3")
     testImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.19.2")
-    testImplementation("io.valkey:valkey-glide:2.+:$nativeClassifier")
+    testImplementation("io.valkey:valkey-glide:2.3.0:$nativeClassifier")
 }
 
 repositories {
@@ -134,7 +134,7 @@ java {
     withJavadocJar()
     withSourcesJar()
     toolchain {
-        languageVersion.set(JavaLanguageVersion.of(11))
+        languageVersion.set(JavaLanguageVersion.of(8))
     }
 }
 
@@ -463,6 +463,7 @@ tasks.register<Test>("test-all-docker") {
         systemProperty("test-no-multi-az-instance", "true")
         systemProperty("test-no-performance", "true")
         systemProperty("test-no-bg", "true")
+        systemProperty("test-exclude-tags", "caching")
     }
 }
 
@@ -476,6 +477,7 @@ tasks.register<Test>("test-all-caching") {
         systemProperty("test-no-performance", "true")
         systemProperty("test-no-bg", "true")
         systemProperty("test-valkey-cache", "true")
+        systemProperty("test-include-tags", "caching")
     }
 }
 

@@ -79,7 +79,6 @@ public class CacheMonitor extends AbstractMonitor {
   private final boolean healthCheckInHealthyState;
 
   // Telemetry
-  private final TelemetryFactory telemetryFactory;
   private static TelemetryCounter stateTransitionCounter;
   private static TelemetryCounter healthCheckSuccessCounter;
   private static TelemetryCounter healthCheckFailureCounter;
@@ -286,7 +285,6 @@ public class CacheMonitor extends AbstractMonitor {
   protected CacheMonitor(long inFlightWriteSizeLimitBytes, boolean healthCheckInHealthyState,
       TelemetryFactory telemetryFactory) {
     super(30); // 30 seconds termination timeout
-    this.telemetryFactory = telemetryFactory;
     this.inFlightWriteSizeLimitBytes = inFlightWriteSizeLimitBytes;
     this.healthCheckInHealthyState = healthCheckInHealthyState;
 
@@ -304,6 +302,9 @@ public class CacheMonitor extends AbstractMonitor {
           () -> clusterStates.values().stream()
               .mapToLong(c -> Math.max(c.consecutiveRwFailures, c.consecutiveRoFailures))
               .max().orElse(0L));
+
+      LOGGER.fine(() -> Messages.get("CacheMonitor.telemetryGaugesInitialized",
+          new Object[] {consecutiveSuccessGauge, consecutiveFailureGauge}));
     }
   }
 
@@ -325,7 +326,7 @@ public class CacheMonitor extends AbstractMonitor {
   private CachePingConnection createPingConnection(ClusterHealthState cluster, boolean isReadOnly) {
     String[] hostPort = isReadOnly ? cluster.roEndpoint.split(":") : cluster.rwEndpoint.split(":");
     return CacheConnection.createPingConnection(hostPort[0], Integer.parseInt(hostPort[1]),
-        isReadOnly, cluster.useSSL, cluster.cacheConnectionTimeout, cluster.iamAuthEnabled, cluster.credentialsProvider,
+        cluster.useSSL, cluster.cacheConnectionTimeout, cluster.iamAuthEnabled,
         cluster.cacheIamRegion, cluster.cacheName, cluster.cacheUsername, cluster.cachePassword);
   }
 
@@ -553,7 +554,7 @@ public class CacheMonitor extends AbstractMonitor {
   }
 
   // Used for integration testing only to reset singleton state between tests
-  public static void resetInstance() {
+  protected static void resetInstance() {
     synchronized (INSTANCE_LOCK) {
       if (instance != null) {
         instance.stop.set(true);
